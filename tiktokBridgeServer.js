@@ -9,6 +9,7 @@ const RECONNECT_DELAY_MS = 5000;
 
 const app = express();
 
+// Очередь теперь хранит объекты: { username, type, giftName, diamonds }
 const queue = [];
 const inQueue = new Set();
 
@@ -19,6 +20,7 @@ const state = {
   lastError: null,
   reconnectAttempts: 0,
   totalChats: 0,
+  totalGifts: 0,
   totalQueued: 0,
   startedAt: new Date().toISOString(),
   lastTryAt: null,
@@ -50,12 +52,28 @@ function findNicksInText(text) {
   return out;
 }
 
-function enqueue(username) {
-  if (inQueue.has(username)) return;
-  queue.push(username);
-  inQueue.add(username);
+function enqueueChat(username) {
+  const key = `chat:${username}`;
+  if (inQueue.has(key)) return;
+  queue.push({ username, type: "chat" });
+  inQueue.add(key);
   state.totalQueued += 1;
-  console.log(`+ queued ${username} (queue: ${queue.length})`);
+  console.log(`+ queued [chat] ${username} (queue: ${queue.length})`);
+}
+
+function enqueueGift(username, giftName, diamonds, repeatCount) {
+  // Подарки всегда добавляем (можно несколько раз)
+  const entry = { 
+    username, 
+    type: "gift", 
+    giftName: giftName || "Gift",
+    diamonds: diamonds || 1,
+    repeatCount: repeatCount || 1
+  };
+  queue.push(entry);
+  state.totalQueued += 1;
+  state.totalGifts += 1;
+  console.log(`+ queued [GIFT] ${username} sent ${giftName} x${repeatCount} (${diamonds} diamonds) (queue: ${queue.length})`);
 }
 
 function parseNicksFromChat(text) {
@@ -83,16 +101,49 @@ function connectTikTok() {
     }
     tiktokLive = new WebcastPushConnection(TIKTOK_HOST_USERNAME);
 
+    // Обработка сообщений чата
     tiktokLive.on("chat", (data) => {
       state.totalChats += 1;
       const author = data.uniqueId || data.nickname || "?";
       const nicks = parseNicksFromChat(data.comment);
       if (nicks.length > 0) {
         console.log(`[chat] ${author}: ${data.comment}  =>  [${nicks.join(", ")}]`);
-        for (const n of nicks) enqueue(n);
+        for (const n of nicks) enqueueChat(n);
       } else {
         console.log(`[chat] ${author}: ${data.comment}  (no valid nick)`);
       }
+    });
+
+    // Обработка подарков
+    tiktokLive.on("gift", (data) => {
+      const author = data.uniqueId || data.nickname || "unknown";
+      const giftName = data.giftName || (data.giftId ? `gift_${data.giftId}` : "Gift");
+      const diamonds = data.diamondCount || data.extendedGiftInfo?.diamondCount || 1;
+      const repeatCount = data.repeatCount || 1;
+      
+      // repeatEnd означает, что стрик подарков закончился — отправляем итоговый
+      if (data.giftType === 1 && !data.repeatEnd) {
+        // Стриковый подарок, ещё не закончился — ждём
+        return;
+      }
+      
+      console.log(`[GIFT] ${author} sent ${giftName} x${repeatCount} (${diamonds} diamonds)`);
+      
+      // Ищем Roblox-ник в нике TikTok автора
+      const nicks = findNicksInText(author);
+      if (nicks.length > 0) {
+        enqueueGift(nicks[0], giftName, diamonds, repeatCount);
+      } else {
+        // Если TikTok-ник не подходит, всё равно добавим — Roblox проверит
+        enqueueGift(author, giftName, diamonds, repeatCount);
+      }
+    });
+
+    // Лайки тоже можно ловить (опционально)
+    tiktokLive.on("like", (data) => {
+      // Раскомментируй, если хочешь реагировать на лайки:
+      // const author = data.uniqueId || "?";
+      // console.log(`[like] ${author} sent ${data.likeCount} likes`);
     });
 
     tiktokLive.on("disconnected", () => {
@@ -157,13 +208,16 @@ app.get("/reconnect", (_req, res) => {
 app.get("/dequeue", (req, res) => {
   const rawLimit = Number(req.query.limit || 20);
   const limit = Math.max(1, Math.min(100, Number.isFinite(rawLimit) ? rawLimit : 20));
-  const usernames = [];
-  while (usernames.length < limit && queue.length > 0) {
-    const name = queue.shift();
-    inQueue.delete(name);
-    usernames.push(name);
+  const items = [];
+  while (items.length < limit && queue.length > 0) {
+    const item = queue.shift();
+    if (item.type === "chat") {
+      inQueue.delete(`chat:${item.username}`);
+    }
+    items.push(item);
   }
-  res.json({ usernames });
+  res.json({ items });
 });
 
 app.listen(PORT, () => console.log(`Bridge listening on ${PORT}`));
+
