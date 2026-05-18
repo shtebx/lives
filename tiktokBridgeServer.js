@@ -1,21 +1,13 @@
 const express = require("express");
 const { WebcastPushConnection } = require("tiktok-live-connector");
 
-// ВАЖНО: впиши сюда СВОЙ TikTok-ник (без @), с которого идёт эфир.
-// Например: const TIKTOK_HOST_USERNAME = "mynick";
-const TIKTOK_HOST_USERNAME = "ipad_flex";
+// ВПИШИ СВОЙ TIKTOK-НИК БЕЗ @
+const TIKTOK_HOST_USERNAME = "crumbleekykii";
 
-// На Railway порт задаётся автоматически
 const PORT = Number(process.env.PORT) || 3000;
-
-if (TIKTOK_HOST_USERNAME === "your_tiktok_live_username") {
-  console.error(
-    "!!! TIKTOK_HOST_USERNAME не задан. Открой tiktokBridgeServer.js и впиши свой TikTok-ник в строку 6, потом сделай redeploy. !!!"
-  );
-}
+const RECONNECT_DELAY_MS = 5000;
 
 const app = express();
-const tiktokLive = new WebcastPushConnection(TIKTOK_HOST_USERNAME);
 
 const queue = [];
 const inQueue = new Set();
@@ -25,10 +17,16 @@ const state = {
   connected: false,
   roomId: null,
   lastError: null,
+  reconnectAttempts: 0,
   totalChats: 0,
   totalQueued: 0,
   startedAt: new Date().toISOString(),
+  lastTryAt: null,
+  lastOkAt: null,
 };
+
+let tiktokLive = null;
+let reconnectTimer = null;
 
 function normalizeUsername(raw) {
   if (typeof raw !== "string") return null;
@@ -42,7 +40,7 @@ function enqueue(username) {
   queue.push(username);
   inQueue.add(username);
   state.totalQueued += 1;
-  console.log(`+ queued ${username} (queue size: ${queue.length})`);
+  console.log(`+ queued ${username} (queue: ${queue.length})`);
 }
 
 function parseNickFromChat(text) {
@@ -51,78 +49,105 @@ function parseNickFromChat(text) {
   return normalizeUsername(firstWord);
 }
 
-tiktokLive.on("chat", (data) => {
-  state.totalChats += 1;
-  const author = data.uniqueId || data.nickname || "?";
-  console.log(`[chat] ${author}: ${data.comment}`);
-  const username = parseNickFromChat(data.comment);
-  if (!username) return;
-  enqueue(username);
-});
-
-tiktokLive.on("disconnected", () => {
-  state.connected = false;
-  console.warn("TikTok disconnected, попробую переподключиться через 5 сек");
-  setTimeout(connectTikTok, 5000);
-});
-
-tiktokLive.on("streamEnd", () => {
-  state.connected = false;
-  console.warn("TikTok stream ended");
-});
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connectTikTok();
+  }, RECONNECT_DELAY_MS);
+}
 
 function connectTikTok() {
-  if (TIKTOK_HOST_USERNAME === "your_tiktok_live_username") {
-    console.error("Не подключаюсь: TIKTOK_HOST_USERNAME не задан");
-    return;
-  }
-  console.log(`Подключаюсь к TikTok @${TIKTOK_HOST_USERNAME}...`);
-  tiktokLive
-    .connect()
-    .then((s) => {
-      state.connected = true;
-      state.roomId = s.roomId;
-      state.lastError = null;
-      console.log(`✓ Подключён к TikTok @${TIKTOK_HOST_USERNAME} roomId=${s.roomId}`);
-    })
-    .catch((err) => {
-      state.connected = false;
-      state.lastError = String(err && err.message ? err.message : err);
-      console.error(`✗ TikTok connect failed: ${state.lastError}`);
-      console.error("Возможные причины: эфир не идёт, ник указан неверно, временная блокировка TikTok. Повтор через 10 сек.");
-      setTimeout(connectTikTok, 10000);
+  state.reconnectAttempts += 1;
+  state.lastTryAt = new Date().toISOString();
+
+  try {
+    if (tiktokLive) {
+      try {
+        tiktokLive.removeAllListeners();
+        tiktokLive.disconnect();
+      } catch (_) {}
+    }
+    tiktokLive = new WebcastPushConnection(TIKTOK_HOST_USERNAME);
+
+    tiktokLive.on("chat", (data) => {
+      state.totalChats += 1;
+      const author = data.uniqueId || data.nickname || "?";
+      console.log(`[chat] ${author}: ${data.comment}`);
+      const username = parseNickFromChat(data.comment);
+      if (!username) return;
+      enqueue(username);
     });
+
+    tiktokLive.on("disconnected", () => {
+      state.connected = false;
+      console.warn("TikTok disconnected — reconnect in 5s");
+      scheduleReconnect();
+    });
+
+    tiktokLive.on("streamEnd", () => {
+      state.connected = false;
+      console.warn("TikTok stream ended — reconnect in 5s");
+      scheduleReconnect();
+    });
+
+    console.log(`Connecting TikTok @${TIKTOK_HOST_USERNAME} (try #${state.reconnectAttempts})...`);
+
+    tiktokLive
+      .connect()
+      .then((s) => {
+        state.connected = true;
+        state.roomId = s.roomId;
+        state.lastError = null;
+        state.lastOkAt = new Date().toISOString();
+        console.log(`OK TikTok connected roomId=${s.roomId}`);
+      })
+      .catch((err) => {
+        state.connected = false;
+        const msg = String(err && err.message ? err.message : err);
+        state.lastError = msg;
+        if (state.reconnectAttempts <= 3 || state.reconnectAttempts % 12 === 0) {
+          console.error(`TikTok connect failed: ${msg}`);
+        }
+        scheduleReconnect();
+      });
+  } catch (err) {
+    state.connected = false;
+    state.lastError = String(err);
+    console.error("connectTikTok crashed:", err);
+    scheduleReconnect();
+  }
 }
 
 connectTikTok();
 
-app.get("/", (_req, res) => {
-  res.json({
-    ok: true,
-    info: "TikTok -> Roblox bridge",
-    state,
-    queueSize: queue.length,
-  });
-});
+app.get("/", (_req, res) =>
+  res.json({ ok: true, info: "TikTok -> Roblox bridge", state, queueSize: queue.length })
+);
 
-app.get("/status", (_req, res) => {
-  res.json({ ...state, queueSize: queue.length, queuePreview: queue.slice(0, 10) });
+app.get("/status", (_req, res) =>
+  res.json({ ...state, queueSize: queue.length, queuePreview: queue.slice(0, 10) })
+);
+
+app.get("/reconnect", (_req, res) => {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  connectTikTok();
+  res.json({ ok: true, msg: "reconnect triggered" });
 });
 
 app.get("/dequeue", (req, res) => {
   const rawLimit = Number(req.query.limit || 20);
   const limit = Math.max(1, Math.min(100, Number.isFinite(rawLimit) ? rawLimit : 20));
-
   const usernames = [];
   while (usernames.length < limit && queue.length > 0) {
     const name = queue.shift();
     inQueue.delete(name);
     usernames.push(name);
   }
-
   res.json({ usernames });
 });
 
-app.listen(PORT, () => {
-  console.log(`Bridge listening on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Bridge listening on ${PORT}`));
