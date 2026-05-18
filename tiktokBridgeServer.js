@@ -35,15 +35,19 @@ function normalizeUsername(raw) {
   return cleaned;
 }
 
-function findNickInText(text) {
-  if (typeof text !== "string") return null;
+function findNicksInText(text) {
+  if (typeof text !== "string") return [];
   const matches = text.match(/[A-Za-z][A-Za-z0-9_]{2,19}/g);
-  if (!matches) return null;
-  let best = null;
+  if (!matches) return [];
+  const seen = new Set();
+  const out = [];
   for (const m of matches) {
-    if (!best || m.length > best.length) best = m;
+    if (!seen.has(m)) {
+      seen.add(m);
+      out.push(m);
+    }
   }
-  return best;
+  return out;
 }
 
 function enqueue(username) {
@@ -54,8 +58,8 @@ function enqueue(username) {
   console.log(`+ queued ${username} (queue: ${queue.length})`);
 }
 
-function parseNickFromChat(text) {
-  return findNickInText(text);
+function parseNicksFromChat(text) {
+  return findNicksInText(text);
 }
 
 function scheduleReconnect() {
@@ -82,10 +86,10 @@ function connectTikTok() {
     tiktokLive.on("chat", (data) => {
       state.totalChats += 1;
       const author = data.uniqueId || data.nickname || "?";
-      const username = parseNickFromChat(data.comment);
-      if (username) {
-        console.log(`[chat] ${author}: ${data.comment}  =>  ${username}`);
-        enqueue(username);
+      const nicks = parseNicksFromChat(data.comment);
+      if (nicks.length > 0) {
+        console.log(`[chat] ${author}: ${data.comment}  =>  [${nicks.join(", ")}]`);
+        for (const n of nicks) enqueue(n);
       } else {
         console.log(`[chat] ${author}: ${data.comment}  (no valid nick)`);
       }
@@ -163,4 +167,3 @@ app.get("/dequeue", (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`Bridge listening on ${PORT}`));
-
