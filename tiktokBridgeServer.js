@@ -2,7 +2,7 @@ const express = require("express");
 const { WebcastPushConnection } = require("tiktok-live-connector");
 
 // ВПИШИ СВОЙ TIKTOK-НИК БЕЗ @
-const TIKTOK_HOST_USERNAME = "ipad_flex";
+const TIKTOK_HOST_USERNAME = "kxayren";
 
 const PORT = Number(process.env.PORT) || 3000;
 const RECONNECT_DELAY_MS = 5000;
