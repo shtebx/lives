@@ -1,13 +1,12 @@
 const express = require("express");
 const { WebcastPushConnection } = require("tiktok-live-connector");
 
-const TIKTOK_HOST_USERNAME = "ipad_flex";
+const TIKTOK_HOST_USERNAME = "loviaadm";
 const PORT = Number(process.env.PORT) || 3000;
 const RECONNECT_DELAY_MS = 5000;
 
 const app = express();
 
-// Только САМЫЙ свежий коммент. Новый перезаписывает старый.
 let latestEvent = null;
 
 const state = {
@@ -17,7 +16,6 @@ const state = {
   lastError: null,
   reconnectAttempts: 0,
   totalChats: 0,
-  totalGifts: 0,
   totalEvents: 0,
   startedAt: new Date().toISOString(),
   lastTryAt: null,
@@ -43,12 +41,11 @@ function findNicksInText(text) {
   return out;
 }
 
-function setLatestEvent(entry) {
-  entry.ts = Date.now();
-  latestEvent = entry;
+function setLatestEvent(username) {
+  latestEvent = { username, ts: Date.now() };
   state.totalEvents += 1;
-  state.lastEventAt = new Date(entry.ts).toISOString();
-  console.log(`+ latest ${entry.type}: ${entry.username}`);
+  state.lastEventAt = new Date(latestEvent.ts).toISOString();
+  console.log(`+ latest: ${username}`);
 }
 
 function scheduleReconnect() {
@@ -88,30 +85,7 @@ function connectTikTok() {
       }
 
       console.log(`[chat] ${author}: ${data.comment}  =>  ${best}`);
-      setLatestEvent({ username: best, type: "chat" });
-    });
-
-    tiktokLive.on("gift", (data) => {
-      if (data.giftType === 1 && !data.repeatEnd) return;
-
-      const author = data.uniqueId || data.nickname || "unknown";
-      const giftName = data.giftName || (data.giftId ? `gift_${data.giftId}` : "Gift");
-      const diamonds = data.diamondCount || data.extendedGiftInfo?.diamondCount || 1;
-      const repeatCount = data.repeatCount || 1;
-
-      console.log(`[GIFT] ${author} sent ${giftName} x${repeatCount}`);
-
-      const nicks = findNicksInText(author);
-      const username = nicks.length > 0 ? nicks[0] : author;
-
-      setLatestEvent({
-        username,
-        type: "gift",
-        giftName,
-        diamonds,
-        repeatCount,
-      });
-      state.totalGifts += 1;
+      setLatestEvent(best);
     });
 
     tiktokLive.on("disconnected", () => {
@@ -148,7 +122,7 @@ function connectTikTok() {
 connectTikTok();
 
 app.get("/", (_req, res) =>
-  res.json({ ok: true, info: "TikTok -> Roblox bridge (realtime latest only)", state, latest: latestEvent })
+  res.json({ ok: true, info: "TikTok -> Roblox bridge", state, latest: latestEvent })
 );
 
 app.get("/status", (_req, res) =>
@@ -164,16 +138,15 @@ app.get("/reconnect", (_req, res) => {
   res.json({ ok: true });
 });
 
-// Отдаём только самый свежий коммент и сразу очищаем
 app.get("/dequeue", (_req, res) => {
   const item = latestEvent;
   latestEvent = null;
 
   if (item) {
-    res.json({ items: [item], mode: "realtime" });
+    res.json({ items: [{ username: item.username }], mode: "realtime" });
   } else {
     res.json({ items: [], mode: "realtime" });
   }
 });
 
-app.listen(PORT, () => console.log(`Bridge listening on ${PORT} (realtime latest only)`));
+app.listen(PORT, () => console.log(`Bridge listening on ${PORT}`));
