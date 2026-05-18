@@ -1,17 +1,14 @@
 const express = require("express");
 const { WebcastPushConnection } = require("tiktok-live-connector");
 
-// ВПИШИ СВОЙ TIKTOK-НИК БЕЗ @
 const TIKTOK_HOST_USERNAME = "ipad_flex";
-
 const PORT = Number(process.env.PORT) || 3000;
 const RECONNECT_DELAY_MS = 5000;
 
 const app = express();
 
-// Очередь теперь хранит объекты: { username, type, giftName, diamonds }
-const queue = [];
-const inQueue = new Set();
+// Только САМЫЙ свежий коммент. Новый перезаписывает старый.
+let latestEvent = null;
 
 const state = {
   tiktokUser: TIKTOK_HOST_USERNAME,
@@ -21,21 +18,15 @@ const state = {
   reconnectAttempts: 0,
   totalChats: 0,
   totalGifts: 0,
-  totalQueued: 0,
+  totalEvents: 0,
   startedAt: new Date().toISOString(),
   lastTryAt: null,
   lastOkAt: null,
+  lastEventAt: null,
 };
 
 let tiktokLive = null;
 let reconnectTimer = null;
-
-function normalizeUsername(raw) {
-  if (typeof raw !== "string") return null;
-  const cleaned = raw.trim();
-  if (!/^[A-Za-z0-9_]{3,20}$/.test(cleaned)) return null;
-  return cleaned;
-}
 
 function findNicksInText(text) {
   if (typeof text !== "string") return [];
@@ -52,32 +43,12 @@ function findNicksInText(text) {
   return out;
 }
 
-function enqueueChat(username) {
-  const key = `chat:${username}`;
-  if (inQueue.has(key)) return;
-  queue.push({ username, type: "chat" });
-  inQueue.add(key);
-  state.totalQueued += 1;
-  console.log(`+ queued [chat] ${username} (queue: ${queue.length})`);
-}
-
-function enqueueGift(username, giftName, diamonds, repeatCount) {
-  // Подарки всегда добавляем (можно несколько раз)
-  const entry = { 
-    username, 
-    type: "gift", 
-    giftName: giftName || "Gift",
-    diamonds: diamonds || 1,
-    repeatCount: repeatCount || 1
-  };
-  queue.push(entry);
-  state.totalQueued += 1;
-  state.totalGifts += 1;
-  console.log(`+ queued [GIFT] ${username} sent ${giftName} x${repeatCount} (${diamonds} diamonds) (queue: ${queue.length})`);
-}
-
-function parseNicksFromChat(text) {
-  return findNicksInText(text);
+function setLatestEvent(entry) {
+  entry.ts = Date.now();
+  latestEvent = entry;
+  state.totalEvents += 1;
+  state.lastEventAt = new Date(entry.ts).toISOString();
+  console.log(`+ latest ${entry.type}: ${entry.username}`);
 }
 
 function scheduleReconnect() {
@@ -101,64 +72,57 @@ function connectTikTok() {
     }
     tiktokLive = new WebcastPushConnection(TIKTOK_HOST_USERNAME);
 
-    // Обработка сообщений чата
     tiktokLive.on("chat", (data) => {
       state.totalChats += 1;
       const author = data.uniqueId || data.nickname || "?";
-      const nicks = parseNicksFromChat(data.comment);
-      if (nicks.length > 0) {
-        console.log(`[chat] ${author}: ${data.comment}  =>  [${nicks.join(", ")}]`);
-        for (const n of nicks) enqueueChat(n);
-      } else {
+      const nicks = findNicksInText(data.comment);
+
+      if (nicks.length === 0) {
         console.log(`[chat] ${author}: ${data.comment}  (no valid nick)`);
+        return;
       }
+
+      let best = nicks[0];
+      for (const n of nicks) {
+        if (n.length > best.length) best = n;
+      }
+
+      console.log(`[chat] ${author}: ${data.comment}  =>  ${best}`);
+      setLatestEvent({ username: best, type: "chat" });
     });
 
-    // Обработка подарков
     tiktokLive.on("gift", (data) => {
+      if (data.giftType === 1 && !data.repeatEnd) return;
+
       const author = data.uniqueId || data.nickname || "unknown";
       const giftName = data.giftName || (data.giftId ? `gift_${data.giftId}` : "Gift");
       const diamonds = data.diamondCount || data.extendedGiftInfo?.diamondCount || 1;
       const repeatCount = data.repeatCount || 1;
-      
-      // repeatEnd означает, что стрик подарков закончился — отправляем итоговый
-      if (data.giftType === 1 && !data.repeatEnd) {
-        // Стриковый подарок, ещё не закончился — ждём
-        return;
-      }
-      
-      console.log(`[GIFT] ${author} sent ${giftName} x${repeatCount} (${diamonds} diamonds)`);
-      
-      // Ищем Roblox-ник в нике TikTok автора
-      const nicks = findNicksInText(author);
-      if (nicks.length > 0) {
-        enqueueGift(nicks[0], giftName, diamonds, repeatCount);
-      } else {
-        // Если TikTok-ник не подходит, всё равно добавим — Roblox проверит
-        enqueueGift(author, giftName, diamonds, repeatCount);
-      }
-    });
 
-    // Лайки тоже можно ловить (опционально)
-    tiktokLive.on("like", (data) => {
-      // Раскомментируй, если хочешь реагировать на лайки:
-      // const author = data.uniqueId || "?";
-      // console.log(`[like] ${author} sent ${data.likeCount} likes`);
+      console.log(`[GIFT] ${author} sent ${giftName} x${repeatCount}`);
+
+      const nicks = findNicksInText(author);
+      const username = nicks.length > 0 ? nicks[0] : author;
+
+      setLatestEvent({
+        username,
+        type: "gift",
+        giftName,
+        diamonds,
+        repeatCount,
+      });
+      state.totalGifts += 1;
     });
 
     tiktokLive.on("disconnected", () => {
       state.connected = false;
-      console.warn("TikTok disconnected — reconnect in 5s");
       scheduleReconnect();
     });
 
     tiktokLive.on("streamEnd", () => {
       state.connected = false;
-      console.warn("TikTok stream ended — reconnect in 5s");
       scheduleReconnect();
     });
-
-    console.log(`Connecting TikTok @${TIKTOK_HOST_USERNAME} (try #${state.reconnectAttempts})...`);
 
     tiktokLive
       .connect()
@@ -171,17 +135,12 @@ function connectTikTok() {
       })
       .catch((err) => {
         state.connected = false;
-        const msg = String(err && err.message ? err.message : err);
-        state.lastError = msg;
-        if (state.reconnectAttempts <= 3 || state.reconnectAttempts % 12 === 0) {
-          console.error(`TikTok connect failed: ${msg}`);
-        }
+        state.lastError = String(err && err.message ? err.message : err);
         scheduleReconnect();
       });
   } catch (err) {
     state.connected = false;
     state.lastError = String(err);
-    console.error("connectTikTok crashed:", err);
     scheduleReconnect();
   }
 }
@@ -189,11 +148,11 @@ function connectTikTok() {
 connectTikTok();
 
 app.get("/", (_req, res) =>
-  res.json({ ok: true, info: "TikTok -> Roblox bridge", state, queueSize: queue.length })
+  res.json({ ok: true, info: "TikTok -> Roblox bridge (realtime latest only)", state, latest: latestEvent })
 );
 
 app.get("/status", (_req, res) =>
-  res.json({ ...state, queueSize: queue.length, queuePreview: queue.slice(0, 10) })
+  res.json({ ...state, latest: latestEvent })
 );
 
 app.get("/reconnect", (_req, res) => {
@@ -202,22 +161,19 @@ app.get("/reconnect", (_req, res) => {
     reconnectTimer = null;
   }
   connectTikTok();
-  res.json({ ok: true, msg: "reconnect triggered" });
+  res.json({ ok: true });
 });
 
-app.get("/dequeue", (req, res) => {
-  const rawLimit = Number(req.query.limit || 20);
-  const limit = Math.max(1, Math.min(100, Number.isFinite(rawLimit) ? rawLimit : 20));
-  const items = [];
-  while (items.length < limit && queue.length > 0) {
-    const item = queue.shift();
-    if (item.type === "chat") {
-      inQueue.delete(`chat:${item.username}`);
-    }
-    items.push(item);
+// Отдаём только самый свежий коммент и сразу очищаем
+app.get("/dequeue", (_req, res) => {
+  const item = latestEvent;
+  latestEvent = null;
+
+  if (item) {
+    res.json({ items: [item], mode: "realtime" });
+  } else {
+    res.json({ items: [], mode: "realtime" });
   }
-  res.json({ items });
 });
 
-app.listen(PORT, () => console.log(`Bridge listening on ${PORT}`));
-
+app.listen(PORT, () => console.log(`Bridge listening on ${PORT} (realtime latest only)`));
