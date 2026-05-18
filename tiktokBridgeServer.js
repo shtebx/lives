@@ -1,7 +1,7 @@
 const express = require("express");
 const { WebcastPushConnection } = require("tiktok-live-connector");
 
-const TIKTOK_HOST_USERNAME = "8ksy_";
+const TIKTOK_HOST_USERNAME = "ipad_flex";
 const PORT = Number(process.env.PORT) || 3000;
 const RECONNECT_DELAY_MS = 5000;
 
