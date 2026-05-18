@@ -1,12 +1,10 @@
 const express = require("express");
 const { WebcastPushConnection } = require("tiktok-live-connector");
 
-// На Railway задай переменную TIKTOK_HOST_USERNAME (ник без @).
-const TIKTOK_HOST_USERNAME =
-  process.env.TIKTOK_HOST_USERNAME || "your_tiktok_live_username";
-// Люди должны писать в чат: !join RobloxNick
-const JOIN_PREFIX = process.env.JOIN_PREFIX || "!join";
-// Railway передаёт свой порт через PORT
+// Твой TikTok-ник (без @), с чьего идёт трансляция — поменяй на свой:
+const TIKTOK_HOST_USERNAME = "ipad_flex";
+// В чате просто пишут Roblox-ник (без !join)
+// На Railway порт задаётся автоматически
 const PORT = Number(process.env.PORT) || 3000;
 
 const app = express();
@@ -30,18 +28,14 @@ function enqueue(username) {
   console.log(`+ queued ${username}`);
 }
 
-function parseJoinMessage(text) {
+function parseNickFromChat(text) {
   if (typeof text !== "string") return null;
-  const msg = text.trim();
-  if (!msg.toLowerCase().startsWith(JOIN_PREFIX)) return null;
-
-  const parts = msg.split(/\s+/);
-  if (parts.length < 2) return null;
-  return normalizeUsername(parts[1]);
+  const firstWord = text.trim().split(/\s+/)[0];
+  return normalizeUsername(firstWord);
 }
 
 tiktokLive.on("chat", (data) => {
-  const username = parseJoinMessage(data.comment);
+  const username = parseNickFromChat(data.comment);
   if (!username) return;
   enqueue(username);
 });
