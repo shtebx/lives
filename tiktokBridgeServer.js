@@ -128,7 +128,7 @@ app.get("/dequeue", (_req, res) => {
     if (top5.length > 0) {
       vipUsername = top5[Math.floor(Math.random() * top5.length)].username;
     }
-    console.log(`🌟 VIP SPAWN #${spawnCounter}: ${vipUsername}`);
+    console.log(`VIP SPAWN #${spawnCounter}: ${vipUsername}`);
   }
 
   res.json({
